@@ -1,0 +1,80 @@
+; These programs handle communication to an eMMC module via DAT0 and CMD line (+ program for CLK)
+; Must be started at the same time
+; One PIO module has space for 32 instructions, this is why I don't have a TX program for DAT0
+; The programs are designed to run at 52MHz -> 2 times the speed of the eMMC (26 MHz), due to jmp instructions and stuff like that
+
+.program emmc_clk_26MHz
+public start:
+.wrap_target
+    set pins, 1 ; State machine must be set to a 52MHz clock cycle because every command here takes 1 clock cycle
+    set pins, 0
+.wrap
+
+; Has to be 52MHz aswell, due to the JMP instruction in the loop
+.program emmc_cmd_tx
+public start:
+.wrap_target
+    ; In total we expect 57 bit to be inserted into the FIFO (1bit for response type, 8 for loop amount (should be 48) and 48bit for actual data)
+    ; out x, 32 ; Get amount of response data expected
+    out x, 1 ; Get kind of response data (48 bit / 136 bit) we expect
+    ; set y, 48 ; CMDs are always 48 bit, DOESN'T WORK -> set only supports 5bit values (wtf)
+    out y, 8 ; Read an 8 bit number from FIFO as the loop amount instead, should be 48 though
+loop_tx:
+    out pins, 1 ; Shift one out
+    jmp y--, loop_tx ; Loop until all 48bit are sent
+    jmp !X, rx_48bit ; Determine the kind of response we expect
+    ; We expect 136bit responses
+    irq wait 1 ; Trigger emmc_cmd_rx_136bit
+    jmp end
+rx_48bit:
+    irq wait 0 ; Trigger emmc_cmd_rx_48bit
+end:
+    nop
+.wrap
+
+.program emmc_cmd_rx_48bit
+public start:
+.wrap_target
+    ; This part using 3 instructions (-> 1,5 instructions in terms of the eMMC CLK) should probably not lead us to miss data bits, as the responses come a bit later
+    wait 1 irq 0 ; Wait for interrupt from tx SM to wait for a CMD response..
+    ; set y, 48 ; We read out 48 bits
+    out y, 8 ; Read 8bit as loop amount, same as with tx
+    wait 0 pin 0 ; Wait for start bit on the cmd line, loop should start in the "second half" of the start bit, so we'll be able to capture it into the FIFO aswell
+loop_recv_48bit:
+    ; Now we put the current bit into the FIFO, JMP costs us another cycle which means we'll never read the same bit twice
+    in pins, 1
+    jmp y--, loop_recv_48bit
+    irq clear 0 ; Clear IRQ, we are done.
+.wrap
+
+.program emmc_cmd_rx_136bit
+public start:
+.wrap_target
+    ; Same thing as with 48bit, read above
+    wait 1 irq 1
+    ; set y, 136
+    out y, 8 ; Same thing
+    wait 0 pin 0
+loop_recv_136bit:
+    in pins, 1
+    jmp y--, loop_recv_136bit
+    irq clear 1
+.wrap
+
+; 23 instructions = 9 left
+
+.program emmc_dat0_block_rx
+public start:
+.wrap_target
+    wait 1 irq 2 ; Wait for trigger signal, probably coming from the MCU code.. Haven't decided yet
+    ; set y, 4114 ; 1 start bit + 512 * 8 data bits (one block is 512 bytes) + 16 CRC bits + 1 end bit (TODO: Is this right???)
+    out y, 16 ; Read 16 bit as loop amount, same thing as with the other programs, should be 4114 though!!
+    wait 0 pin 0 ; Wait for start bit on DAT0 line, same timing thing happens as with emmc_cmd_rx_48bit
+loop_recv_4114bit:
+    in pins, 1
+    jmp y--, loop_recv_4114bit
+    irq clear 2 ; Done
+.wrap
+
+; 3 left
+; emmc_dat0_tx is missing
